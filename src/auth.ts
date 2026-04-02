@@ -2,7 +2,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 // Base64url encode bytes or a string
-function b64url(data: Uint8Array | string): string {
+export function b64url(data: Uint8Array | string): string {
   const bytes = typeof data === 'string' ? enc.encode(data) : data;
   let s = '';
   for (const b of bytes) s += String.fromCharCode(b);
@@ -16,9 +16,16 @@ function b64urlDecode(s: string): Uint8Array {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 }
 
-type KeyUsage = 'sign' | 'verify' | 'encrypt' | 'decrypt' | 'wrapKey' | 'unwrapKey' | 'deriveKey' | 'deriveBits';
+// Convert hex string to Uint8Array
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
 
-async function importHmacKey(keyBytes: Uint8Array, usage: KeyUsage[]): Promise<CryptoKey> {
+async function importHmacKey(keyBytes: Uint8Array, usage: ('sign' | 'verify')[]): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
     keyBytes,
@@ -36,30 +43,30 @@ export async function verifyTelegramAuth(
   data: Record<string, string | number>,
   botToken: string,
 ): Promise<boolean> {
-  const { hash, ...fields } = data;
-  if (!hash || typeof hash !== 'string') return false;
+  try {
+    const { hash, ...fields } = data;
+    if (!hash || typeof hash !== 'string') return false;
 
-  // Reject if auth_date is older than 24 hours
-  const authDate = Number(fields.auth_date);
-  if (!authDate || Date.now() / 1000 - authDate > 86400) return false;
+    // Reject if auth_date is older than 24 hours
+    const authDate = Number(fields.auth_date);
+    if (isNaN(authDate) || Date.now() / 1000 - authDate > 86400) return false;
 
-  // Build data check string: sorted key=value pairs joined by \n
-  const checkString = Object.entries(fields)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n');
+    // Build data check string: sorted key=value pairs joined by \n
+    const checkString = Object.entries(fields)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n');
 
-  // secret_key = SHA256(bot_token)
-  const secretKey = await crypto.subtle.digest('SHA-256', enc.encode(botToken));
+    // secret_key = SHA256(bot_token)
+    const secretKey = await crypto.subtle.digest('SHA-256', enc.encode(botToken));
 
-  // HMAC-SHA256(check_string, secret_key)
-  const key = await importHmacKey(new Uint8Array(secretKey), ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(checkString));
-  const expected = Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-
-  return expected === hash;
+    // HMAC-SHA256(check_string, secret_key) — constant-time verify
+    const key = await importHmacKey(new Uint8Array(secretKey), ['verify']);
+    const hashBytes = hexToBytes(hash);
+    return await crypto.subtle.verify('HMAC', key, hashBytes, enc.encode(checkString));
+  } catch {
+    return false;
+  }
 }
 
 export interface JwtClaims {
@@ -97,6 +104,7 @@ export async function verifyJwt(token: string, secret: string): Promise<JwtClaim
     );
     if (!valid) return null;
     const claims = JSON.parse(dec.decode(b64urlDecode(payload))) as JwtClaims;
+    if (typeof claims.sub !== 'string' || typeof claims.name !== 'string' || typeof claims.exp !== 'number') return null;
     if (Date.now() / 1000 > claims.exp) return null;
     return claims;
   } catch {
