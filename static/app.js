@@ -44,6 +44,43 @@ let authDisplayName = null; // name from /api/me, null for guests
 const $ = (id) => document.getElementById(id);
 const screens = document.querySelectorAll('.screen');
 
+// --- Leaderboard ---
+
+async function loadLeaderboard() {
+  try {
+    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+    const res = await fetch('/api/leaderboard', { headers });
+    if (!res.ok) return;
+    renderLeaderboard(await res.json());
+  } catch { /* non-critical — silent fail */ }
+}
+
+function renderLeaderboard(data) {
+  const section = document.getElementById('leaderboard-section');
+  if (!section) return;
+  if (!data.top || data.top.length === 0) {
+    section.innerHTML = '';
+    return;
+  }
+  const medals = ['🥇', '🥈', '🥉', '', ''];
+  let rows = data.top.map((e) =>
+    `<div class="lb-row">
+      <span class="lb-rank">${medals[e.rank - 1] || '#' + e.rank}</span>
+      <span class="lb-name">${esc(e.displayName)}</span>
+      <span class="lb-stats">${e.wins}W / ${e.gamesPlayed}G</span>
+    </div>`
+  ).join('');
+  if (data.me) {
+    rows += `<div class="lb-divider"></div>
+    <div class="lb-row lb-me">
+      <span class="lb-rank">#${data.me.rank}</span>
+      <span class="lb-name">You</span>
+      <span class="lb-stats">${data.me.wins}W / ${data.me.gamesPlayed}G</span>
+    </div>`;
+  }
+  section.innerHTML = `<div class="lb-card"><div class="lb-header">🏆 Leaderboard</div>${rows}</div>`;
+}
+
 // --- Auth ---
 
 async function loadTelegramWidget() {
@@ -78,6 +115,7 @@ window.onTelegramAuth = async function (user) {
     authDisplayName = displayName;
     localStorage.setItem('authToken', token);
     showGameSection(displayName);
+    loadLeaderboard();
   } catch {
     alert('Telegram login failed. Please try again.');
   }
@@ -125,6 +163,7 @@ function showGameSection(name) {
       authDisplayName = null;
       localStorage.removeItem('authToken');
       showLoginSection();
+      loadLeaderboard();
     });
   } else {
     authStatus.textContent = 'Playing as guest';
@@ -733,6 +772,7 @@ document.getElementById('btn-guest').addEventListener('click', () => {
 
 // Kick off auth check on page load
 initAuth();
+loadLeaderboard();
 
 $('btn-create').addEventListener('click', async () => {
   playerName = $('input-name').value.trim();
