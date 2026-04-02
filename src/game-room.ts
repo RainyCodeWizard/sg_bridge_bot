@@ -179,6 +179,7 @@ export class GameRoom extends DurableObject {
       partnerCard: null,
       passCount: 0,
       lastTrick: null,
+      trickComplete: false,
     };
   }
 
@@ -217,6 +218,7 @@ export class GameRoom extends DurableObject {
       isPartner: state.partner === mySeat,
       mySeat,
       lastTrick: state.lastTrick,
+      trickComplete: state.trickComplete,
     };
     return { type: 'state', state: view };
   }
@@ -529,6 +531,12 @@ export class GameRoom extends DurableObject {
     }
 
     hand[suit] = hand[suit].filter((v) => v !== cardValue);
+
+    if (state.trickComplete) {
+      state.playedCards = [null, null, null, null];
+      state.trickComplete = false;
+    }
+
     state.playedCards[seat] = card;
 
     if (state.firstPlayer === seat) {
@@ -565,15 +573,10 @@ export class GameRoom extends DurableObject {
         winner,
       };
 
-      // Send state with all 4 cards still visible BEFORE clearing the trick,
-      // so the client can render the last card before the sweep animation.
-      await this.saveState(state);
-      this.broadcastFullState(state);
-
       state.turn = winner;
       state.firstPlayer = winner;
       state.currentSuit = null;
-      state.playedCards = [null, null, null, null];
+      state.trickComplete = true;
 
       const bidder = state.bidder;
       const partner = state.partner;
@@ -629,6 +632,7 @@ export class GameRoom extends DurableObject {
       }
 
       await this.saveState(state);
+      this.broadcastFullState(state);
       return;
     }
 
@@ -658,6 +662,7 @@ export class GameRoom extends DurableObject {
     state.partnerCard = null;
     state.passCount = 0;
     state.lastTrick = null;
+    state.trickComplete = false;
 
     await this.saveState(state);
 

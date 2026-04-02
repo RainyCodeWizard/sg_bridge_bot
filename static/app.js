@@ -35,8 +35,6 @@ let reconnectTimer = null;
 let reconnectDelay = 2000;
 let gameState = null;
 let lastGameOver = null;
-let pendingTrickAnimation = null;
-let trickAnimationTimeout = null;
 
 // --- DOM refs ---
 const $ = (id) => document.getElementById(id);
@@ -168,12 +166,8 @@ document.addEventListener('visibilitychange', () => {
 function handleMessage(msg) {
   switch (msg.type) {
     case 'state':
-      if (pendingTrickAnimation) {
-        pendingTrickAnimation.nextState = msg.state;
-      } else {
-        gameState = msg.state;
-        renderState();
-      }
+      gameState = msg.state;
+      renderState();
       break;
     case 'error':
       alert(msg.message);
@@ -213,40 +207,12 @@ function handleMessage(msg) {
 function animateTrickWon(msg) {
   if (!gameState) return;
 
-  clearTimeout(trickAnimationTimeout);
-  pendingTrickAnimation = { nextState: null };
+  showTrickWonBanner(msg.winnerName);
 
-  const mySeat = gameState.mySeat;
-  const seatOrder = [mySeat, (mySeat + 1) % 4, (mySeat + 2) % 4, (mySeat + 3) % 4];
-  const posMap = {};
-  seatOrder.forEach((seat, i) => {
-    posMap[seat] = ['bot', 'left', 'top', 'right'][i];
-  });
-
-  const winnerPos = posMap[msg.winnerSeat];
-
-  // Use requestAnimationFrame to ensure the browser has painted the last card
-  // before starting the sweep animation.
-  requestAnimationFrame(() => {
-    const trickArea = $('trick-area');
-    if (trickArea) {
-      trickArea.querySelectorAll('.trick-card').forEach((el) => {
-        el.classList.add('trick-sweep-' + winnerPos);
-      });
-    }
-
-    showTrickWonBanner(msg.winnerName);
-
-    trickAnimationTimeout = setTimeout(() => {
-      const anim = pendingTrickAnimation;
-      pendingTrickAnimation = null;
-
-      if (anim && anim.nextState) {
-        gameState = anim.nextState;
-      }
-      renderState();
-    }, 1400);
-  });
+  const trickArea = $('trick-area');
+  if (trickArea) {
+    trickArea.classList.add('trick-complete');
+  }
 }
 
 function showPartnerNotification(bidderName) {
@@ -473,6 +439,7 @@ function renderPlay(s) {
   // Trick area
   const trickArea = $('trick-area');
   trickArea.innerHTML = '';
+  trickArea.classList.toggle('trick-complete', !!s.trickComplete);
   for (let i = 0; i < 4; i++) {
     const seat = seatOrder[i];
     const trickPos = trickPositions[i];
@@ -495,7 +462,7 @@ function renderPlay(s) {
     item.textContent = `${s.players[i].name}: ${s.sets[i]}`;
     setsDiv.appendChild(item);
   }
-  if (s.lastTrick) {
+  if (s.lastTrick && !s.trickComplete) {
     const ltBtn = document.createElement('button');
     ltBtn.className = 'btn-last-trick';
     ltBtn.textContent = 'Last Trick';
@@ -589,8 +556,6 @@ function buildHashWithId(room) {
 
 function leaveGame() {
   clearTimeout(reconnectTimer);
-  clearTimeout(trickAnimationTimeout);
-  pendingTrickAnimation = null;
   if (ws) {
     ws.onclose = null;
     ws.close();

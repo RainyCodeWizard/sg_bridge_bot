@@ -39,6 +39,7 @@ export interface GameState {
   partnerCard: string | null;
   passCount: number;
   lastTrick: TrickRecord | null;
+  trickComplete: boolean;
 }
 
 export interface PlayerGameView {
@@ -60,6 +61,7 @@ export interface PlayerGameView {
   isPartner: boolean;
   mySeat: number;
   lastTrick: TrickRecord | null;
+  trickComplete: boolean;
 }
 
 export interface Env {

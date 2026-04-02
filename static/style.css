@@ -475,6 +475,11 @@ html, body {
 .trick-card-right { grid-area: right; }
 .trick-card-bot   { grid-area: bot; }
 
+.trick-area.trick-complete .trick-card {
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+}
+
 .sets-display {
   display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem;
   margin-bottom: 0.5rem; font-size: 0.8rem;
