@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Floating Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- Top bar (visible when in a game) -->
+  <div id="top-bar" class="top-bar hidden">
+    <span id="top-bar-room" class="top-bar-room"></span>
+    <span id="top-bar-name" class="top-bar-name"></span>
+    <button id="btn-leave-global" class="btn-leave-global">Leave</button>
+  </div>
+
+  <!-- Reconnecting overlay -->
+  <div id="overlay-reconnect" class="overlay hidden">
+    <div class="overlay-content">
+      <div class="spinner"></div>
+      <p>Reconnecting...</p>
+    </div>
+  </div>
+
+  <!-- Home screen -->
+  <div id="screen-home" class="screen active">
+    <div class="home-container">
+      <h1>♠♥ Floating Bridge ♦♣</h1>
+      <p class="subtitle">Singaporean Card Game</p>
+
+      <div class="form-group">
+        <label for="input-name">Your Name</label>
+        <input type="text" id="input-name" placeholder="Enter your name" maxlength="20" autocomplete="off">
+      </div>
+
+      <button id="btn-create" class="btn btn-primary">Create Game</button>
+
+      <div class="divider"><span>or</span></div>
+
+      <div class="form-group">
+        <label for="input-room">Room Code</label>
+        <input type="text" id="input-room" placeholder="e.g. AB12" maxlength="4" autocomplete="off" style="text-transform:uppercase">
+      </div>
+
+      <button id="btn-join" class="btn btn-secondary">Join Game</button>
+    </div>
+  </div>
+
+  <!-- Lobby screen -->
+  <div id="screen-lobby" class="screen hidden">
+    <div class="lobby-container">
+      <h2>Game Lobby</h2>
+      <div class="room-code-display">
+        <span class="label">Room Code</span>
+        <span id="lobby-room-code" class="code">----</span>
+      </div>
+      <button id="btn-share-link" class="btn btn-secondary btn-share">Share Invite Link</button>
+      <div id="lobby-players" class="player-list"></div>
+      <p id="lobby-status" class="status-text">Waiting for players...</p>
+    </div>
+  </div>
+
+  <!-- Bidding screen -->
+  <div id="screen-bidding" class="screen hidden">
+    <div class="bidding-container">
+      <div class="bid-info">
+        <h2>Bidding</h2>
+        <p id="bid-status"></p>
+        <p id="bid-current"></p>
+      </div>
+      <div id="bid-grid" class="bid-grid"></div>
+      <button id="btn-pass" class="btn btn-pass">Pass</button>
+      <div class="hand-display">
+        <h3>Your Hand</h3>
+        <div id="bidding-hand" class="card-hand"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Partner selection screen -->
+  <div id="screen-partner" class="screen hidden">
+    <div class="partner-container">
+      <h2 id="partner-title">Select Partner Card</h2>
+      <p id="partner-status"></p>
+      <div id="partner-grid" class="partner-grid"></div>
+      <div class="hand-display">
+        <h3>Your Hand</h3>
+        <div id="partner-hand" class="card-hand"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Play screen -->
+  <div id="screen-play" class="screen hidden">
+    <div class="play-container">
+      <div class="game-info-bar">
+        <span id="play-bid-info"></span>
+        <span id="play-partner-info"></span>
+        <span id="play-trump-info"></span>
+      </div>
+
+      <div class="table">
+        <!-- Opponent top (seat across) -->
+        <div class="seat seat-top">
+          <div class="seat-label" id="seat-top-label"></div>
+          <div class="seat-card" id="seat-top-card"></div>
+        </div>
+
+        <!-- Opponent left -->
+        <div class="seat seat-left">
+          <div class="seat-label" id="seat-left-label"></div>
+          <div class="seat-card" id="seat-left-card"></div>
+        </div>
+
+        <!-- Opponent right -->
+        <div class="seat seat-right">
+          <div class="seat-label" id="seat-right-label"></div>
+          <div class="seat-card" id="seat-right-card"></div>
+        </div>
+
+        <!-- Current player (bottom) -->
+        <div class="seat seat-bottom">
+          <div class="seat-label" id="seat-bottom-label"></div>
+          <div class="seat-card" id="seat-bottom-card"></div>
+        </div>
+
+        <!-- Trick area center -->
+        <div class="trick-area" id="trick-area"></div>
+      </div>
+
+      <div class="sets-display" id="sets-display"></div>
+
+      <div class="hand-display">
+        <div id="play-hand" class="card-hand"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game over screen -->
+  <div id="screen-gameover" class="screen hidden">
+    <div class="gameover-container">
+      <h2 id="gameover-title"></h2>
+      <p id="gameover-detail"></p>
+      <div id="gameover-scores" class="scores"></div>
+      <div class="gameover-actions">
+        <button id="btn-play-again" class="btn btn-primary">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
