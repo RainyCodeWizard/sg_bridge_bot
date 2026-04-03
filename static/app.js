@@ -920,6 +920,7 @@ function renderGameOver(s) {
   const bidderName = s.bidder >= 0 ? s.players[s.bidder].name : '?';
   const bidStr = s.bid >= 0 ? getBidFromNum(s.bid) : '?';
 
+  const container = $('gameover-container');
   if (lastGameOver) {
     const myName = s.mySeat >= 0 ? s.players[s.mySeat].name : '';
     const iWon = lastGameOver.winnerNames.includes(myName);
@@ -927,23 +928,45 @@ function renderGameOver(s) {
       lastGameOver._soundPlayed = true;
       iWon ? playWinSound() : playLoseSound();
     }
+    if (container) {
+      container.classList.remove('outcome-win', 'outcome-loss');
+      container.classList.add(iWon ? 'outcome-win' : 'outcome-loss');
+    }
     title.textContent = iWon ? 'You Won!' : 'Game Over';
     const winnersStr = lastGameOver.winnerNames.join(' & ');
     detail.textContent = lastGameOver.bidderWon
       ? `${winnersStr} won the bid of ${bidStr} (needed ${s.setsNeeded} sets)`
       : `${winnersStr} defeated the bid of ${bidStr}`;
   } else {
+    if (container) container.classList.remove('outcome-win', 'outcome-loss');
     title.textContent = 'Game Over';
     detail.textContent = `Bid: ${bidderName} - ${bidStr} (needed ${s.setsNeeded} sets)`;
   }
 
+  // Determine which players are on the bidder's team
+  let bidderTeamNames = null;
+  if (lastGameOver && s.bidder >= 0) {
+    bidderTeamNames = new Set(
+      lastGameOver.bidderWon
+        ? lastGameOver.winnerNames
+        : s.players.map((p) => p.name).filter((n) => !lastGameOver.winnerNames.includes(n)),
+    );
+  }
+  const partnerSeat = bidderTeamNames
+    ? s.players.findIndex((p, idx) => idx !== s.bidder && bidderTeamNames.has(p.name))
+    : -1;
+
   scores.innerHTML = '';
   for (let i = 0; i < s.players.length; i++) {
     const item = document.createElement('div');
-    item.className = 'score-item';
-    let nameText = s.players[i].name;
-    if (i === s.bidder) nameText += ' (Bidder)';
-    item.innerHTML = `<span class="name">${esc(nameText)}</span><span class="sets-won">${s.sets[i]} sets</span>`;
+    const isBidderTeam = bidderTeamNames && bidderTeamNames.has(s.players[i].name);
+    item.className = `score-item${isBidderTeam ? ' team-bidder' : ''}`;
+    const roleBadge = i === s.bidder
+      ? '<span class="role-badge">Bidder</span>'
+      : i === partnerSeat
+        ? '<span class="role-badge">Partner</span>'
+        : '';
+    item.innerHTML = `<span class="name">${esc(s.players[i].name)}${roleBadge}</span><span class="sets-won">${s.sets[i]} sets</span>`;
     scores.appendChild(item);
   }
 
