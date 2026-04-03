@@ -717,11 +717,10 @@ export class GameRoom extends DurableObject {
 
         if (state.groupId) {
           const bidStr = getBidFromNum(state.bid);
-          const tricksMade = state.sets[bidder] + (partner !== bidder ? state.sets[partner] : 0);
           sendMessage(
             (this.env as Env).TELEGRAM_BOT_TOKEN,
             state.groupId,
-            `🏆 ${winnerNames.join(' & ')} won!\nBid ${bidStr}, made ${tricksMade}/${state.setsNeeded} tricks`,
+            `🏆 ${winnerNames.join(' & ')} won!\nBid ${bidStr}, made ${bidderSets}/${state.setsNeeded} tricks`,
           ).catch(() => {});
           await recordGroupResult(
             (this.env as Env).DB,
@@ -825,6 +824,23 @@ export class GameRoom extends DurableObject {
     state.lastTrick = null;
     state.trickComplete = false;
     state.bidHistory = [];
+
+    // Re-check group membership for the new round
+    if (state.groupId) {
+      await Promise.all(
+        state.players.map(async (p) => {
+          if (p.id.startsWith('tg_')) {
+            p.isGroupMember = await isChatMember(
+              (this.env as Env).TELEGRAM_BOT_TOKEN,
+              state.groupId!,
+              Number(p.id.slice(3)),
+            );
+          } else {
+            p.isGroupMember = false;
+          }
+        }),
+      );
+    }
 
     await this.saveState(state);
 
