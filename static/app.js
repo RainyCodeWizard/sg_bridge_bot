@@ -937,13 +937,30 @@ function renderGameOver(s) {
     detail.textContent = `Bid: ${bidderName} - ${bidStr} (needed ${s.setsNeeded} sets)`;
   }
 
+  // Determine which players are on the bidder's team
+  let bidderTeamNames = null;
+  if (lastGameOver && s.bidder >= 0) {
+    bidderTeamNames = new Set(
+      lastGameOver.bidderWon
+        ? lastGameOver.winnerNames
+        : s.players.map((p) => p.name).filter((n) => !lastGameOver.winnerNames.includes(n)),
+    );
+  }
+  const partnerSeat = bidderTeamNames
+    ? s.players.findIndex((p, idx) => idx !== s.bidder && bidderTeamNames.has(p.name))
+    : -1;
+
   scores.innerHTML = '';
   for (let i = 0; i < s.players.length; i++) {
     const item = document.createElement('div');
-    item.className = 'score-item';
-    let nameText = s.players[i].name;
-    if (i === s.bidder) nameText += ' (Bidder)';
-    item.innerHTML = `<span class="name">${esc(nameText)}</span><span class="sets-won">${s.sets[i]} sets</span>`;
+    const isBidderTeam = bidderTeamNames && bidderTeamNames.has(s.players[i].name);
+    item.className = `score-item${isBidderTeam ? ' team-bidder' : ''}`;
+    const roleBadge = i === s.bidder
+      ? '<span class="role-badge">Bidder</span>'
+      : i === partnerSeat
+        ? '<span class="role-badge">Partner</span>'
+        : '';
+    item.innerHTML = `<span class="name">${esc(s.players[i].name)}${roleBadge}</span><span class="sets-won">${s.sets[i]} sets</span>`;
     scores.appendChild(item);
   }
 
