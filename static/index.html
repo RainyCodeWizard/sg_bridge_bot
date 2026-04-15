@@ -32,21 +32,34 @@
       <h1>♠♥ Floating Bridge ♦♣</h1>
       <p class="subtitle">Singaporean Card Game</p>
 
-      <div class="form-group">
-        <label for="input-name">Your Name</label>
-        <input type="text" id="input-name" placeholder="Enter your name" maxlength="20" autocomplete="off">
+      <div id="leaderboard-section"></div>
+
+      <!-- Telegram login section (shown when not logged in) -->
+      <div id="login-section">
+        <div id="telegram-widget-container"></div>
+        <button id="btn-guest" class="btn btn-ghost">Continue as Guest</button>
       </div>
 
-      <button id="btn-create" class="btn btn-primary">Create Game</button>
+      <!-- Game section (shown after login or as guest) -->
+      <div id="game-section" class="hidden">
+        <div id="auth-status" class="auth-status"></div>
 
-      <div class="divider"><span>or</span></div>
+        <div class="form-group">
+          <label for="input-name">Your Name</label>
+          <input type="text" id="input-name" placeholder="Enter your name" maxlength="20" autocomplete="off">
+        </div>
 
-      <div class="form-group">
-        <label for="input-room">Room Code</label>
-        <input type="text" id="input-room" placeholder="e.g. AB12" maxlength="4" autocomplete="off" style="text-transform:uppercase">
+        <button id="btn-create" class="btn btn-primary">Create Game</button>
+
+        <div class="divider"><span>or</span></div>
+
+        <div class="form-group">
+          <label for="input-room">Room Code</label>
+          <input type="text" id="input-room" placeholder="e.g. AB12" maxlength="4" autocomplete="off" style="text-transform:uppercase">
+        </div>
+
+        <button id="btn-join" class="btn btn-secondary">Join Game</button>
       </div>
-
-      <button id="btn-join" class="btn btn-secondary">Join Game</button>
     </div>
   </div>
 
@@ -61,6 +74,7 @@
       <button id="btn-share-link" class="btn btn-secondary btn-share">Share Invite Link</button>
       <div id="lobby-players" class="player-list"></div>
       <p id="lobby-status" class="status-text">Waiting for players...</p>
+      <button id="lobby-add-bot" class="btn btn-ghost btn-small hidden" onclick="send({type:'addBot'})">🤖 Add Bot</button>
     </div>
   </div>
 
@@ -72,6 +86,7 @@
         <div id="bidding-players" class="player-status-bar"></div>
         <p id="bid-status"></p>
         <p id="bid-current"></p>
+        <div id="bid-history"></div>
       </div>
       <div id="bid-grid" class="bid-grid"></div>
       <button id="btn-pass" class="btn btn-pass">Pass</button>
@@ -105,7 +120,7 @@
         <span id="play-trump-info"></span>
       </div>
 
-      <div class="table">
+      <div class="table" id="play-table">
         <!-- Opponent top (seat across) -->
         <div class="seat seat-top">
           <div class="seat-label" id="seat-top-label"></div>
@@ -144,14 +159,24 @@
 
   <!-- Game over screen -->
   <div id="screen-gameover" class="screen hidden">
-    <div class="gameover-container">
+    <div class="gameover-container" id="gameover-container">
       <h2 id="gameover-title"></h2>
       <div id="gameover-players" class="player-status-bar"></div>
       <p id="gameover-detail"></p>
       <div id="gameover-scores" class="scores"></div>
+      <div id="gameover-group-lb"></div>
       <div class="gameover-actions">
         <button id="btn-play-again" class="btn btn-primary">Play Again</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Spectator seat-select screen -->
+  <div id="screen-spectator" class="screen hidden">
+    <div class="home-container">
+      <h2>👁 Choose who to watch</h2>
+      <p class="subtitle">Pick a player — you can't switch until the game ends.</p>
+      <div id="spectator-grid" class="spectator-grid"></div>
     </div>
   </div>
 

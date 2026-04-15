@@ -1,3 +1,5 @@
+import type { D1Database, DurableObjectNamespace } from '@cloudflare/workers-types';
+
 export type Suit = '♣' | '♦' | '♥' | '♠';
 export type BidSuit = Suit | '🚫';
 
@@ -13,11 +15,27 @@ export interface Player {
   name: string;
   seat: number;
   connected: boolean;
+  wins?: number;
+  gamesPlayed?: number;
+  isBot?: boolean;
+  isGroupMember?: boolean;
 }
 
 export interface TrickRecord {
   cards: (string | null)[];
   winner: number;
+}
+
+export interface Spectator {
+  id: string;
+  name: string;
+  watchingSeat: number; // -1 = not yet chosen
+}
+
+export interface BidHistoryEntry {
+  seat: number;
+  name: string;
+  bidNum: number | null; // null = pass
 }
 
 export interface GameState {
@@ -40,12 +58,16 @@ export interface GameState {
   passCount: number;
   lastTrick: TrickRecord | null;
   trickComplete: boolean;
+  bidHistory: BidHistoryEntry[];
+  spectators: Spectator[];
+  firstBidder: number;
+  groupId: string | null;
 }
 
 export interface PlayerGameView {
   roomCode: string;
   phase: GamePhase;
-  players: { name: string; seat: number; connected: boolean }[];
+  players: { name: string; seat: number; connected: boolean; wins?: number; gamesPlayed?: number; isBot?: boolean; isGroupMember?: boolean }[];
   hand: Hand | null;
   turn: number;
   bidder: number;
@@ -62,10 +84,19 @@ export interface PlayerGameView {
   mySeat: number;
   lastTrick: TrickRecord | null;
   trickComplete: boolean;
+  bidHistory: BidHistoryEntry[];
+  isSpectator: boolean;
+  watchingSeat: number;
+  groupId: string | null;
+  isGroupMember?: boolean;
 }
 
 export interface Env {
   GAME_ROOM: DurableObjectNamespace;
+  DB: D1Database;
+  JWT_SECRET: string;
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_BOT_USERNAME: string;
 }
 
 export const NUM_PLAYERS = 4;

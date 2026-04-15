@@ -1,8 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
-import type { GameState, PlayerGameView, Suit, Hand, Env, TrickRecord } from './types';
-import { NUM_PLAYERS, MAX_BID, CARD_SUITS } from './types';
-import { generateHands, getBidFromNum, getNumFromBid, getValidSuits, compareCards } from './bridge';
+import type { GameState, PlayerGameView, Suit, Hand, Env, TrickRecord, BidHistoryEntry, Spectator } from './types';
+import { NUM_PLAYERS, MAX_BID, CARD_SUITS, BID_SUITS } from './types';
+import { generateHands, getBidFromNum, getNumFromBid, getValidSuits, compareCards, getNumFromValue } from './bridge';
 import type { ClientMessage, ServerMessage } from './protocol';
+import { recordGameResult, getWinnerSeats } from './stats';
+import { getUser, recordGroupResult } from './db';
+import { sendMessage, isChatMember } from './telegram';
 
 interface SessionInfo {
   playerId: string;
@@ -10,6 +13,7 @@ interface SessionInfo {
 
 export class GameRoom extends DurableObject {
   sessions: Map<WebSocket, SessionInfo>;
+  private botActionRunning = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -29,8 +33,8 @@ export class GameRoom extends DurableObject {
     const url = new URL(request.url);
 
     if (url.pathname === '/create' && request.method === 'POST') {
-      const { roomCode } = (await request.json()) as { roomCode: string };
-      const state = this.createInitialState(roomCode);
+      const { roomCode, groupId } = (await request.json()) as { roomCode: string; groupId?: string | null };
+      const state = this.createInitialState(roomCode, groupId ?? null);
       await this.ctx.storage.put('state', state);
       return Response.json({ ok: true });
     }
@@ -64,6 +68,7 @@ export class GameRoom extends DurableObject {
         const player = state.players.find((p) => p.id === playerId);
         if (player) {
           player.connected = true;
+          await this.refreshPlayerStats(player, playerId);
           await this.saveState(state);
           this.broadcastExcept(
             { type: 'playerReconnected', seat: player.seat, name: player.name },
@@ -105,18 +110,32 @@ export class GameRoom extends DurableObject {
         break;
       case 'bid':
         await this.handleBid(state, session.playerId, msg.bidNum);
+        this.ctx.waitUntil(this.scheduleBotAction());
         break;
       case 'pass':
         await this.handlePass(state, session.playerId);
+        this.ctx.waitUntil(this.scheduleBotAction());
         break;
       case 'selectPartner':
         await this.handleSelectPartner(state, session.playerId, msg.card);
+        this.ctx.waitUntil(this.scheduleBotAction());
         break;
       case 'playCard':
         await this.handlePlayCard(state, session.playerId, msg.card);
+        this.ctx.waitUntil(this.scheduleBotAction());
         break;
       case 'playAgain':
         await this.handlePlayAgain(state, session.playerId);
+        this.ctx.waitUntil(this.scheduleBotAction());
+        break;
+      case 'watchSeat':
+        await this.handleWatchSeat(state, session.playerId, msg.seat, ws);
+        break;
+      case 'addBot':
+        await this.handleAddBot(state, session.playerId);
+        break;
+      case 'removeBot':
+        await this.handleRemoveBot(state, session.playerId);
         break;
     }
   }
@@ -163,7 +182,7 @@ export class GameRoom extends DurableObject {
 
   // --- State helpers ---
 
-  private createInitialState(roomCode: string): GameState {
+  private createInitialState(roomCode: string, groupId: string | null = null): GameState {
     return {
       roomCode,
       phase: 'lobby',
@@ -184,6 +203,10 @@ export class GameRoom extends DurableObject {
       passCount: 0,
       lastTrick: null,
       trickComplete: false,
+      bidHistory: [],
+      spectators: [],
+      firstBidder: 0,
+      groupId,
     };
   }
 
@@ -197,7 +220,10 @@ export class GameRoom extends DurableObject {
 
   private buildStateMessage(state: GameState, playerId: string): ServerMessage {
     const player = state.players.find((p) => p.id === playerId);
-    const mySeat = player?.seat ?? -1;
+    const spectator = !player ? state.spectators.find((s) => s.id === playerId) : undefined;
+    const isSpectator = !!spectator;
+    const mySeat = player?.seat ?? (spectator ? spectator.watchingSeat : -1);
+    const watchingSeat = spectator?.watchingSeat ?? -1;
 
     const view: PlayerGameView = {
       roomCode: state.roomCode,
@@ -206,6 +232,10 @@ export class GameRoom extends DurableObject {
         name: p.name,
         seat: p.seat,
         connected: p.connected,
+        wins: p.wins,
+        gamesPlayed: p.gamesPlayed,
+        isBot: p.isBot,
+        isGroupMember: p.isGroupMember,
       })),
       hand: mySeat >= 0 && state.hands.length > 0 ? state.hands[mySeat] : null,
       turn: state.turn,
@@ -223,6 +253,11 @@ export class GameRoom extends DurableObject {
       mySeat,
       lastTrick: state.lastTrick,
       trickComplete: state.trickComplete,
+      bidHistory: state.bidHistory,
+      isSpectator,
+      watchingSeat,
+      groupId: state.groupId,
+      isGroupMember: player?.isGroupMember,
     };
     return { type: 'state', state: view };
   }
@@ -276,6 +311,19 @@ export class GameRoom extends DurableObject {
     }
   }
 
+  private async refreshPlayerStats(player: import('./types').Player, playerId: string): Promise<void> {
+    if (!playerId.startsWith('tg_')) return;
+    const telegramId = Number(playerId.slice(3));
+    const userRow = await getUser((this.env as Env).DB, telegramId).catch(() => null);
+    if (userRow && userRow.games_played > 0) {
+      player.wins = userRow.wins;
+      player.gamesPlayed = userRow.games_played;
+    } else {
+      player.wins = undefined;
+      player.gamesPlayed = undefined;
+    }
+  }
+
   private getSeatPlayer(state: GameState, playerId: string): number {
     const p = state.players.find((pl) => pl.id === playerId);
     return p ? p.seat : -1;
@@ -293,6 +341,7 @@ export class GameRoom extends DurableObject {
     if (existing) {
       existing.name = name;
       existing.connected = true;
+      await this.refreshPlayerStats(existing, playerId);
       await this.saveState(state);
       ws.send(JSON.stringify(this.buildStateMessage(state, playerId)));
       this.broadcastExcept(
@@ -302,8 +351,19 @@ export class GameRoom extends DurableObject {
       return;
     }
 
+    // Check if already a spectator (reconnect)
+    const existingSpectator = state.spectators.find((s) => s.id === playerId);
+    if (existingSpectator) {
+      existingSpectator.name = name;
+      ws.send(JSON.stringify(this.buildStateMessage(state, playerId)));
+      return;
+    }
+
     if (state.phase !== 'lobby') {
-      ws.send(JSON.stringify({ type: 'error', message: 'Game already in progress' }));
+      // Game in progress — join as spectator
+      state.spectators.push({ id: playerId, name, watchingSeat: -1 });
+      await this.saveState(state);
+      ws.send(JSON.stringify(this.buildStateMessage(state, playerId)));
       return;
     }
 
@@ -313,7 +373,23 @@ export class GameRoom extends DurableObject {
     }
 
     const seat = state.players.length;
-    state.players.push({ id: playerId, name, seat, connected: true });
+    const newPlayer = { id: playerId, name, seat, connected: true } as import('./types').Player;
+    await this.refreshPlayerStats(newPlayer, playerId);
+
+    // Group membership check
+    if (state.groupId && playerId.startsWith('tg_')) {
+      const telegramId = Number(playerId.slice(3));
+      newPlayer.isGroupMember = await isChatMember(
+        (this.env as Env).TELEGRAM_BOT_TOKEN,
+        state.groupId,
+        telegramId,
+      );
+    } else if (state.groupId) {
+      // Guest in a group-linked room — not a member
+      newPlayer.isGroupMember = false;
+    }
+
+    state.players.push(newPlayer);
 
     this.broadcast({
       type: 'joined',
@@ -325,14 +401,23 @@ export class GameRoom extends DurableObject {
     if (state.players.length === NUM_PLAYERS) {
       state.phase = 'bidding';
       state.hands = generateHands();
-      state.turn = 0;
+      state.turn = state.firstBidder;
       state.bidder = -1;
       state.bid = -1;
       state.passCount = 0;
       await this.saveState(state);
 
-      this.broadcast({ type: 'gameStart', turn: 0 });
+      this.broadcast({ type: 'gameStart', turn: state.firstBidder });
       this.broadcastFullState(state);
+      if (state.groupId) {
+        const names = state.players.map((p) => p.name).join(', ');
+        sendMessage(
+          (this.env as Env).TELEGRAM_BOT_TOKEN,
+          state.groupId,
+          `🎮 Game started!\nPlayers: ${names}`,
+        ).catch(() => {});
+      }
+      this.ctx.waitUntil(this.scheduleBotAction());
     } else {
       await this.saveState(state);
       this.broadcastFullState(state);
@@ -358,6 +443,7 @@ export class GameRoom extends DurableObject {
     state.setsNeeded = parseInt(parts[0], 10) + 6;
     state.bidder = seat;
     state.passCount = 0;
+    state.bidHistory.push({ seat, name: state.players[seat].name, bidNum });
 
     this.broadcast({
       type: 'bidMade',
@@ -383,6 +469,7 @@ export class GameRoom extends DurableObject {
     if (seat !== state.turn) return;
 
     state.passCount++;
+    state.bidHistory.push({ seat, name: state.players[seat].name, bidNum: null });
 
     this.broadcast({
       type: 'passed',
@@ -395,10 +482,11 @@ export class GameRoom extends DurableObject {
     if (state.passCount === NUM_PLAYERS && state.bidder < 0) {
       // All passed without any bid -- redeal
       state.hands = generateHands();
-      state.turn = 0;
+      state.turn = state.firstBidder;
       state.bid = -1;
       state.bidder = -1;
       state.passCount = 0;
+      state.bidHistory = [];
       await this.saveState(state);
 
       this.broadcast({ type: 'allPassed' });
@@ -418,10 +506,11 @@ export class GameRoom extends DurableObject {
     if (state.bidder < 0) {
       // Everyone passed with no bid -- redeal
       state.hands = generateHands();
-      state.turn = 0;
+      state.turn = state.firstBidder;
       state.bid = -1;
       state.bidder = -1;
       state.passCount = 0;
+      state.bidHistory = [];
       await this.saveState(state);
 
       this.broadcast({ type: 'allPassed' });
@@ -439,6 +528,14 @@ export class GameRoom extends DurableObject {
       setsNeeded: state.setsNeeded,
       name: state.players[state.bidder].name,
     });
+
+    if (state.groupId) {
+      sendMessage(
+        (this.env as Env).TELEGRAM_BOT_TOKEN,
+        state.groupId,
+        `🔨 ${state.players[state.bidder].name} bid ${getBidFromNum(state.bid)}`,
+      ).catch(() => {});
+    }
 
     await this.saveState(state);
     this.broadcastFullState(state);
@@ -612,6 +709,26 @@ export class GameRoom extends DurableObject {
           bidderWon: true,
           winnerNames,
         });
+        await recordGameResult(
+          (this.env as Env).DB,
+          state.players,
+          getWinnerSeats(bidder, partner, true),
+        );
+
+        if (state.groupId) {
+          const bidStr = getBidFromNum(state.bid);
+          sendMessage(
+            (this.env as Env).TELEGRAM_BOT_TOKEN,
+            state.groupId,
+            `🏆 ${winnerNames.join(' & ')} won!\nBid ${bidStr}, made ${bidderSets}/${state.setsNeeded} tricks`,
+          ).catch(() => {});
+          await recordGroupResult(
+            (this.env as Env).DB,
+            state.groupId,
+            state.players,
+            getWinnerSeats(bidder, partner, true),
+          );
+        }
 
         await this.saveState(state);
         this.broadcastFullState(state);
@@ -629,6 +746,26 @@ export class GameRoom extends DurableObject {
           bidderWon: false,
           winnerNames,
         });
+        await recordGameResult(
+          (this.env as Env).DB,
+          state.players,
+          getWinnerSeats(bidder, partner, false),
+        );
+
+        if (state.groupId) {
+          const bidStr = getBidFromNum(state.bid);
+          sendMessage(
+            (this.env as Env).TELEGRAM_BOT_TOKEN,
+            state.groupId,
+            `🛡️ ${winnerNames.join(' & ')} defended!\n${state.players[bidder].name}'s ${bidStr} bid failed`,
+          ).catch(() => {});
+          await recordGroupResult(
+            (this.env as Env).DB,
+            state.groupId,
+            state.players,
+            getWinnerSeats(bidder, partner, false),
+          );
+        }
 
         await this.saveState(state);
         this.broadcastFullState(state);
@@ -644,15 +781,34 @@ export class GameRoom extends DurableObject {
     this.broadcastFullState(state);
   }
 
+  private async handleWatchSeat(
+    state: GameState,
+    playerId: string,
+    seat: number,
+    ws: WebSocket,
+  ): Promise<void> {
+    const spectator = state.spectators.find((s) => s.id === playerId);
+    if (!spectator) return;
+    if (spectator.watchingSeat >= 0) return; // locked — cannot change mid-game
+    if (seat < 0 || seat >= NUM_PLAYERS) return;
+    spectator.watchingSeat = seat;
+    await this.saveState(state);
+    ws.send(JSON.stringify(this.buildStateMessage(state, playerId)));
+  }
+
   private async handlePlayAgain(
     state: GameState,
     _playerId: string,
   ): Promise<void> {
     if (state.phase !== 'gameover') return;
 
+    const otherSeats = [0, 1, 2, 3].filter((s) => s !== state.firstBidder);
+    const nextFirstBidder = otherSeats[Math.floor(Math.random() * otherSeats.length)];
+
     state.phase = 'bidding';
     state.hands = generateHands();
-    state.turn = 0;
+    state.turn = nextFirstBidder;
+    state.firstBidder = nextFirstBidder;
     state.bidder = -1;
     state.bid = -1;
     state.trumpSuit = null;
@@ -667,10 +823,382 @@ export class GameRoom extends DurableObject {
     state.passCount = 0;
     state.lastTrick = null;
     state.trickComplete = false;
+    state.bidHistory = [];
+
+    // Re-check group membership for the new round
+    if (state.groupId) {
+      await Promise.all(
+        state.players.map(async (p) => {
+          if (p.id.startsWith('tg_')) {
+            p.isGroupMember = await isChatMember(
+              (this.env as Env).TELEGRAM_BOT_TOKEN,
+              state.groupId!,
+              Number(p.id.slice(3)),
+            );
+          } else {
+            p.isGroupMember = false;
+          }
+        }),
+      );
+    }
 
     await this.saveState(state);
 
-    this.broadcast({ type: 'gameStart', turn: 0 });
+    this.broadcast({ type: 'gameStart', turn: nextFirstBidder });
+    this.broadcastFullState(state);
+  }
+
+  // --- Bot support ---
+
+  private async scheduleBotAction(): Promise<void> {
+    await Promise.resolve(); // micro-yield so any pending finally blocks run first
+    if (this.botActionRunning) return;
+    this.botActionRunning = true;
+    try {
+      while (true) {
+        await new Promise<void>((r) => setTimeout(r, 700));
+        const state = await this.getState();
+        if (!state) break;
+        const acted = await this.triggerBotAction(state);
+        if (!acted) break;
+      }
+    } finally {
+      this.botActionRunning = false;
+    }
+  }
+
+  private async triggerBotAction(state: GameState): Promise<boolean> {
+    if (state.phase === 'bidding') {
+      const current = state.players[state.turn];
+      if (!current?.isBot) return false;
+      const bidNum = this.getBotBid(state, state.turn);
+      if (bidNum !== null) {
+        await this.handleBid(state, current.id, bidNum);
+      } else {
+        await this.handlePass(state, current.id);
+      }
+      return true;
+    }
+    if (state.phase === 'partner') {
+      const bidder = state.players[state.bidder];
+      if (!bidder?.isBot) return false;
+      const card = this.getBotPartnerCard(state, state.bidder);
+      await this.handleSelectPartner(state, bidder.id, card);
+      return true;
+    }
+    if (state.phase === 'play') {
+      const current = state.players[state.turn];
+      if (!current?.isBot) return false;
+      const card = this.getBotCard(state, state.turn);
+      if (!card) return false;
+      await this.handlePlayCard(state, current.id, card);
+      return true;
+    }
+    return false;
+  }
+
+  // --- Intermediate bot card play ---
+  // Confidence model: before partner card revealed = 0.65, after = 0.85.
+  // Each decision point rolls Math.random() against confidence; failures fall back to basic logic.
+  // Bidder team: don't steal partner's win, cover partner when losing.
+  // Opposition: don't waste trump on lost tricks, prioritise blocking the bidder, avoid leading trump.
+  // Leading: bidder team prefers suits partner bid (bid history signal); opposition avoids bidder's suits.
+
+  private getBotCard(state: GameState, seat: number): string {
+    const hand = state.hands[seat];
+    const validSuits = getValidSuits(hand, state.trumpSuit, state.currentSuit, state.trumpBroken);
+    if (validSuits.length === 0) return '';
+
+    const validCards: string[] = [];
+    for (const suit of validSuits) {
+      for (const value of hand[suit]) {
+        validCards.push(`${value} ${suit}`);
+      }
+    }
+    if (validCards.length === 0) return '';
+
+    const trickInProgress = !state.trickComplete && state.playedCards.some((c) => c !== null);
+    const onBidderTeam = this.isOnBidderTeam(state, seat);
+    const confidence = this.isPartnerCardRevealed(state) ? 0.85 : 0.65;
+    const useTeamLogic = state.partner >= 0 && Math.random() < confidence;
+
+    if (!trickInProgress) {
+      return useTeamLogic
+        ? this.getBotLeadCard(state, seat, validCards, onBidderTeam)
+        : this.lowestCard(validCards);
+    }
+
+    if (useTeamLogic) {
+      return onBidderTeam
+        ? this.getBotCardAsBidderTeam(state, validCards)
+        : this.getBotCardAsOpposition(state, seat, validCards);
+    }
+
+    // Basic fallback: win if possible, else lowest
+    const orderedSoFar = this.getOrderedCardsPlayed(state);
+    const winningCards = validCards.filter((card) => {
+      const test = [...orderedSoFar, card];
+      return compareCards(test, state.currentSuit!, state.trumpSuit) === test.length - 1;
+    });
+    return winningCards.length > 0 ? this.lowestCard(winningCards) : this.lowestCard(validCards);
+  }
+
+  private getBotCardAsBidderTeam(state: GameState, validCards: string[]): string {
+    const currentWinnerSeat = this.getCurrentTrickWinnerSeat(state);
+    if (currentWinnerSeat !== null && this.isOnBidderTeam(state, currentWinnerSeat)) {
+      // Teammate winning — dump lowest, don't steal
+      return this.lowestCard(validCards);
+    }
+    // Opposition winning — play lowest card that takes the trick; else dump lowest
+    const orderedSoFar = this.getOrderedCardsPlayed(state);
+    const winning = validCards.filter((card) => {
+      const test = [...orderedSoFar, card];
+      return compareCards(test, state.currentSuit!, state.trumpSuit) === test.length - 1;
+    });
+    return winning.length > 0 ? this.lowestCard(winning) : this.lowestCard(validCards);
+  }
+
+  private getBotCardAsOpposition(state: GameState, seat: number, validCards: string[]): string {
+    const currentWinnerSeat = this.getCurrentTrickWinnerSeat(state);
+    // If an opposition teammate is already winning, dump lowest (no need to spend cards)
+    if (currentWinnerSeat !== null && !this.isOnBidderTeam(state, currentWinnerSeat)) {
+      return this.lowestCard(validCards);
+    }
+
+    // Bidder's team is winning — try to beat them (prioritise beating the bidder)
+    const orderedSoFar = this.getOrderedCardsPlayed(state);
+    const winning = validCards.filter((card) => {
+      const test = [...orderedSoFar, card];
+      return compareCards(test, state.currentSuit!, state.trumpSuit) === test.length - 1;
+    });
+    if (winning.length > 0) return this.lowestCard(winning);
+
+    // Can't win — dump lowest non-trump to conserve trump for later
+    const nonTrump = validCards.filter((c) => c.split(' ')[1] !== state.trumpSuit);
+    return this.lowestCard(nonTrump.length > 0 ? nonTrump : validCards);
+  }
+
+  private getBotLeadCard(
+    state: GameState,
+    seat: number,
+    validCards: string[],
+    onBidderTeam: boolean,
+  ): string {
+    // Build suit sets from bid history
+    const partnerBidSuits = new Set<string>();
+    const bidderBidSuits = new Set<string>();
+    for (const entry of state.bidHistory) {
+      if (entry.bidNum === null) continue;
+      const suit = getBidFromNum(entry.bidNum).split(' ')[1];
+      if (suit === '🚫') continue;
+      if (entry.seat === state.partner) partnerBidSuits.add(suit);
+      if (entry.seat === state.bidder) bidderBidSuits.add(suit);
+    }
+
+    if (onBidderTeam) {
+      // Prefer leading a suit the partner bid (they likely have more)
+      const partnerSuitCards = validCards.filter(
+        (c) => partnerBidSuits.has(c.split(' ')[1]) && c.split(' ')[1] !== state.trumpSuit,
+      );
+      if (partnerSuitCards.length > 0) return this.lowestCard(partnerSuitCards);
+      // Else lead longest non-trump suit
+      return this.leadLongestNonTrump(state, seat, validCards);
+    } else {
+      // Opposition: never lead trump; avoid suits the bidder bid (they're strong there)
+      const safe = validCards.filter(
+        (c) => c.split(' ')[1] !== state.trumpSuit && !bidderBidSuits.has(c.split(' ')[1]) && !partnerBidSuits.has(c.split(' ')[1]),
+      );
+      if (safe.length > 0) return this.lowestCard(safe);
+      // Fallback: at least avoid trump
+      const nonTrump = validCards.filter((c) => c.split(' ')[1] !== state.trumpSuit);
+      return this.lowestCard(nonTrump.length > 0 ? nonTrump : validCards);
+    }
+  }
+
+  private leadLongestNonTrump(state: GameState, seat: number, validCards: string[]): string {
+    const hand = state.hands[seat];
+    let bestSuit: import('./types').Suit | null = null;
+    let bestLen = 0;
+    for (const suit of CARD_SUITS) {
+      if (suit === state.trumpSuit) continue;
+      if (hand[suit].length > bestLen) { bestLen = hand[suit].length; bestSuit = suit; }
+    }
+    if (bestSuit) {
+      const cards = validCards.filter((c) => c.split(' ')[1] === bestSuit);
+      if (cards.length > 0) return this.lowestCard(cards);
+    }
+    return this.lowestCard(validCards);
+  }
+
+  private isOnBidderTeam(state: GameState, seat: number): boolean {
+    return seat === state.bidder || seat === state.partner;
+  }
+
+  private isPartnerCardRevealed(state: GameState): boolean {
+    if (!state.partnerCard || state.partner < 0) return false;
+    const [value, suit] = state.partnerCard.split(' ');
+    for (let s = 0; s < NUM_PLAYERS; s++) {
+      if (state.hands[s][suit as import('./types').Suit]?.includes(value)) return false;
+    }
+    return true; // no longer in any hand → has been played
+  }
+
+  private getOrderedCardsPlayed(state: GameState): string[] {
+    const result: string[] = [];
+    for (let i = 0; i < NUM_PLAYERS; i++) {
+      const idx = (state.firstPlayer + i) % NUM_PLAYERS;
+      if (state.playedCards[idx] !== null) result.push(state.playedCards[idx]!);
+    }
+    return result;
+  }
+
+  private getCurrentTrickWinnerSeat(state: GameState): number | null {
+    if (!state.currentSuit) return null;
+    const ordered: string[] = [];
+    const seats: number[] = [];
+    for (let i = 0; i < NUM_PLAYERS; i++) {
+      const idx = (state.firstPlayer + i) % NUM_PLAYERS;
+      if (state.playedCards[idx] !== null) { ordered.push(state.playedCards[idx]!); seats.push(idx); }
+    }
+    if (ordered.length === 0) return null;
+    return seats[compareCards(ordered, state.currentSuit, state.trumpSuit)];
+  }
+
+  private lowestCard(cards: string[]): string {
+    return cards.reduce((best, card) => {
+      const bestNum = getNumFromValue(best.split(' ')[0]);
+      const cardNum = getNumFromValue(card.split(' ')[0]);
+      return cardNum < bestNum ? card : best;
+    });
+  }
+
+  private getBotHandPoints(hand: import('./types').Hand): number {
+    let points = 0;
+    for (const suit of CARD_SUITS) {
+      const values = hand[suit];
+      for (const value of values) {
+        if (value === 'A') points += 4;
+        else if (value === 'K') points += 3;
+        else if (value === 'Q') points += 2;
+        else if (value === 'J') points += 1;
+      }
+      if (values.length >= 5) points += values.length - 4;
+    }
+    return points;
+  }
+
+  private getBotBid(state: GameState, seat: number): number | null {
+    const hand = state.hands[seat];
+    const points = this.getBotHandPoints(hand);
+
+    // Determine desired bid level based on hand strength
+    let desiredLevel: number;
+    if (points < 12) return null;
+    else if (points < 15) desiredLevel = 1;
+    else if (points < 18) desiredLevel = 2;
+    else desiredLevel = 3;
+
+    // Find best trump suit: longest suit, tiebreak by HCP in that suit
+    let bestSuitIdx = 4; // default: no-trump (index 4 in BID_SUITS)
+    let bestLen = 0;
+    let bestHCP = 0;
+    for (let si = 0; si < CARD_SUITS.length; si++) {
+      const suit = CARD_SUITS[si];
+      const values = hand[suit];
+      const hcp = values.reduce((s, v) => s + (v === 'A' ? 4 : v === 'K' ? 3 : v === 'Q' ? 2 : v === 'J' ? 1 : 0), 0);
+      if (values.length > bestLen || (values.length === bestLen && hcp > bestHCP)) {
+        bestLen = values.length;
+        bestHCP = hcp;
+        bestSuitIdx = si; // CARD_SUITS and BID_SUITS share the same 0-3 suit indices
+      }
+    }
+    // Short suits (≤3 cards) don't make reliable trump — prefer no-trump
+    if (bestLen <= 3) bestSuitIdx = 4;
+
+    // Try preferred suit, then higher suits at same level, up to no-trump
+    for (let si = bestSuitIdx; si <= 4; si++) {
+      const bidNum = (desiredLevel - 1) * 5 + si;
+      if (bidNum > state.bid && bidNum <= MAX_BID) return bidNum;
+    }
+
+    // Nothing valid at desired level — pass rather than overbid
+    return null;
+  }
+
+  private getBotPartnerCard(state: GameState, bidderSeat: number): string {
+    // Pick the highest card the bidder doesn't hold
+    // Suits tried highest-first: ♠ ♥ ♦ ♣
+    const VALUES = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
+    for (const suit of ['♠', '♥', '♦', '♣'] as import('./types').Suit[]) {
+      const held = new Set(state.hands[bidderSeat][suit]);
+      for (const value of VALUES) {
+        if (!held.has(value)) return `${value} ${suit}`;
+      }
+    }
+    return 'A ♠';
+  }
+
+  private async handleAddBot(state: GameState, playerId: string): Promise<void> {
+    if (state.phase !== 'lobby') return;
+    const requestor = state.players.find((p) => p.id === playerId);
+    if (!requestor || requestor.seat !== 0) return;
+    if (state.players.length >= NUM_PLAYERS) return;
+
+    const botSeat = state.players.length;
+    const botNames = ['Bot Alpha', 'Bot Beta', 'Bot Gamma'];
+    const botName = botNames[botSeat - 1] ?? `Bot ${botSeat}`;
+    const bot: import('./types').Player = {
+      id: `bot_${botSeat}`,
+      name: botName,
+      seat: botSeat,
+      connected: true,
+      isBot: true,
+    };
+    state.players.push(bot);
+
+    this.broadcast({
+      type: 'joined',
+      playerName: botName,
+      seat: botSeat,
+      playerCount: state.players.length,
+    });
+
+    if (state.players.length === NUM_PLAYERS) {
+      state.phase = 'bidding';
+      state.hands = generateHands();
+      state.turn = state.firstBidder;
+      state.bidder = -1;
+      state.bid = -1;
+      state.passCount = 0;
+      await this.saveState(state);
+      this.broadcast({ type: 'gameStart', turn: state.firstBidder });
+      this.broadcastFullState(state);
+      if (state.groupId) {
+        const names = state.players.map((p) => p.name).join(', ');
+        sendMessage(
+          (this.env as Env).TELEGRAM_BOT_TOKEN,
+          state.groupId,
+          `🎮 Game started!\nPlayers: ${names}`,
+        ).catch(() => {});
+      }
+      this.ctx.waitUntil(this.scheduleBotAction());
+    } else {
+      await this.saveState(state);
+      this.broadcastFullState(state);
+    }
+  }
+
+  private async handleRemoveBot(state: GameState, playerId: string): Promise<void> {
+    if (state.phase !== 'lobby') return;
+    const requestor = state.players.find((p) => p.id === playerId);
+    if (!requestor || requestor.seat !== 0) return;
+
+    // Only remove the last player if it's a bot
+    const lastPlayer = state.players[state.players.length - 1];
+    if (!lastPlayer?.isBot) return;
+
+    state.players.pop();
+    await this.saveState(state);
     this.broadcastFullState(state);
   }
 }

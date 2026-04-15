@@ -35,10 +35,172 @@ let reconnectTimer = null;
 let reconnectDelay = 2000;
 let gameState = null;
 let lastGameOver = null;
+let prevTurn = -1;
+
+// Auth state
+let authToken = localStorage.getItem('authToken') || null;
+let authDisplayName = null; // name from /api/me, null for guests
 
 // --- DOM refs ---
 const $ = (id) => document.getElementById(id);
 const screens = document.querySelectorAll('.screen');
+
+// --- Leaderboard ---
+
+async function loadLeaderboard() {
+  try {
+    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+    const res = await fetch('/api/leaderboard', { headers });
+    if (!res.ok) return;
+    renderLeaderboard(await res.json());
+  } catch { /* non-critical — silent fail */ }
+}
+
+function renderLeaderboard(data) {
+  const section = document.getElementById('leaderboard-section');
+  if (!section) return;
+  if (!data.top || data.top.length === 0) {
+    section.innerHTML = '';
+    return;
+  }
+  const medals = ['🥇', '🥈', '🥉', '', ''];
+  let rows = data.top.map((e) =>
+    `<div class="lb-row">
+      <span class="lb-rank">${medals[e.rank - 1] || '#' + e.rank}</span>
+      <span class="lb-name">${esc(e.displayName)}</span>
+      <span class="lb-stats">${e.wins}W / ${e.gamesPlayed}G</span>
+    </div>`
+  ).join('');
+  if (data.me) {
+    rows += `<div class="lb-divider"></div>
+    <div class="lb-row lb-me">
+      <span class="lb-rank">#${data.me.rank}</span>
+      <span class="lb-name">You</span>
+      <span class="lb-stats">${data.me.wins}W / ${data.me.gamesPlayed}G</span>
+    </div>`;
+  }
+  section.innerHTML = `<div class="lb-card"><div class="lb-header">🏆 Leaderboard</div>${rows}</div>`;
+}
+
+async function renderGroupLeaderboard(groupId) {
+  const el = $('gameover-group-lb');
+  if (!el) return;
+  try {
+    const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+    const res = await fetch(`/api/leaderboard?groupId=${encodeURIComponent(groupId)}`, { headers });
+    if (!res.ok) { el.innerHTML = ''; return; }
+    const data = await res.json();
+    if (!data.top || data.top.length === 0) { el.innerHTML = ''; return; }
+    const medals = ['🥇', '🥈', '🥉', '', ''];
+    let rows = data.top.map((e) =>
+      `<div class="lb-row">
+        <span class="lb-rank">${medals[e.rank - 1] || '#' + e.rank}</span>
+        <span class="lb-name">${esc(e.displayName)}</span>
+        <span class="lb-stats">${e.wins}W / ${e.gamesPlayed}G</span>
+      </div>`
+    ).join('');
+    if (data.me) {
+      rows += `<div class="lb-divider"></div>
+      <div class="lb-row lb-me">
+        <span class="lb-rank">#${data.me.rank}</span>
+        <span class="lb-name">You</span>
+        <span class="lb-stats">${data.me.wins}W / ${data.me.gamesPlayed}G</span>
+      </div>`;
+    }
+    el.innerHTML = `<div class="lb-card"><div class="lb-header">🏆 Group Leaderboard</div>${rows}</div>`;
+  } catch {
+    el.innerHTML = '';
+  }
+}
+
+// --- Auth ---
+
+async function loadTelegramWidget() {
+  const container = document.getElementById('telegram-widget-container');
+  if (container.hasChildNodes()) return; // already loaded
+  try {
+    const res = await fetch('/api/config');
+    const { botUsername } = await res.json();
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = 'https://telegram.org/js/telegram-widget.js?22';
+    script.setAttribute('data-telegram-login', botUsername);
+    script.setAttribute('data-size', 'large');
+    script.setAttribute('data-onauth', 'onTelegramAuth(user)');
+    script.setAttribute('data-request-access', 'write');
+    container.appendChild(script);
+  } catch {
+    // If config fails, just show guest option
+  }
+}
+
+window.onTelegramAuth = async function (user) {
+  try {
+    const res = await fetch('/api/auth/telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user),
+    });
+    if (!res.ok) throw new Error('Auth failed');
+    const { token, displayName } = await res.json();
+    authToken = token;
+    authDisplayName = displayName;
+    localStorage.setItem('authToken', token);
+    showGameSection(displayName);
+    loadLeaderboard();
+  } catch {
+    alert('Telegram login failed. Please try again.');
+  }
+};
+
+async function initAuth() {
+  if (authToken) {
+    try {
+      const res = await fetch('/api/me', {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok) {
+        const { displayName } = await res.json();
+        authDisplayName = displayName;
+        showGameSection(displayName);
+        return;
+      }
+    } catch { /* fall through to guest */ }
+    // Token invalid/expired — clear it
+    authToken = null;
+    authDisplayName = null;
+    localStorage.removeItem('authToken');
+  }
+  // Not logged in — show login section
+  showLoginSection();
+}
+
+function showLoginSection() {
+  document.getElementById('login-section').classList.remove('hidden');
+  document.getElementById('game-section').classList.add('hidden');
+  loadTelegramWidget();
+}
+
+function showGameSection(name) {
+  document.getElementById('login-section').classList.add('hidden');
+  document.getElementById('game-section').classList.remove('hidden');
+  const nameInput = document.getElementById('input-name');
+  if (name) nameInput.value = name; // prefer auth name over localStorage
+  const authStatus = document.getElementById('auth-status');
+  if (authDisplayName) {
+    authStatus.innerHTML = `Logged in as <strong>${esc(authDisplayName)}</strong> · <a href="#" id="btn-logout">Logout</a>`;
+    document.getElementById('btn-logout').addEventListener('click', (e) => {
+      e.preventDefault();
+      authToken = null;
+      authDisplayName = null;
+      localStorage.removeItem('authToken');
+      showLoginSection();
+      loadLeaderboard();
+    });
+  } else {
+    authStatus.textContent = 'Playing as guest';
+  }
+}
 
 // --- Screen management ---
 function showScreen(id) {
@@ -122,7 +284,8 @@ function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/api/ws?room=${roomCode}&playerId=${playerId}`);
+  const tokenParam = authToken ? `&token=${encodeURIComponent(authToken)}` : '';
+  ws = new WebSocket(`${proto}//${location.host}/api/ws?room=${roomCode}&playerId=${playerId}${tokenParam}`);
 
   ws.onopen = () => {
     reconnectDelay = 2000;
@@ -162,6 +325,126 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// --- Sounds ---
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playBidSound(delay = 0) {
+  try {
+    const ctx = getAudioCtx();
+    // Hammer slam: low thud with quick attack
+    const bufSize = ctx.sampleRate * 0.12;
+    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      const t = i / ctx.sampleRate;
+      // Low-frequency thud (80Hz) + noise burst, fast decay
+      data[i] = (Math.sin(2 * Math.PI * 80 * t) * 0.6 + (Math.random() * 2 - 1) * 0.4)
+        * Math.pow(1 - i / bufSize, 4);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+    const gain = ctx.createGain();
+    const t0 = ctx.currentTime + delay;
+    gain.gain.setValueAtTime(0.7, t0);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.12);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start(t0);
+  } catch {}
+}
+
+function playCardSound() {
+  try {
+    const ctx = getAudioCtx();
+    const bufSize = ctx.sampleRate * 0.08;
+    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufSize, 3);
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1200;
+    filter.Q.value = 0.8;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.4, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+  } catch {}
+}
+
+function playDingSound() {
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.35, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.6);
+  } catch {}
+}
+
+function playWinSound() {
+  try {
+    const ctx = getAudioCtx();
+    // Ascending arpeggio: C5 E5 G5 C6
+    [523, 659, 784, 1047].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t = ctx.currentTime + i * 0.12;
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.3, t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.4);
+    });
+  } catch {}
+}
+
+function playLoseSound() {
+  try {
+    const ctx = getAudioCtx();
+    // Descending minor: A4 F4 D4 A3
+    [440, 349, 294, 220].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t = ctx.currentTime + i * 0.18;
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.25, t + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.5);
+    });
+  } catch {}
+}
+
 // --- Message handler ---
 function handleMessage(msg) {
   switch (msg.type) {
@@ -175,8 +458,13 @@ function handleMessage(msg) {
     case 'joined':
       break;
     case 'gameStart':
+      playBidSound(0);
+      playBidSound(0.18);
+      playBidSound(0.36);
       break;
     case 'bidMade':
+      playBidSound();
+      break;
     case 'passed':
       break;
     case 'bidWon':
@@ -190,7 +478,11 @@ function handleMessage(msg) {
       break;
     case 'playPhaseStart':
       break;
+    case 'bidMade':
+      playBidSound();
+      break;
     case 'cardPlayed':
+      playCardSound();
       break;
     case 'trickWon':
       animateTrickWon(msg);
@@ -337,6 +629,13 @@ function renderState() {
   const s = gameState;
   if (!s) return;
 
+  // Spectator hasn't chosen a player yet — show selection screen
+  if (s.isSpectator && s.watchingSeat < 0) {
+    showScreen('screen-spectator');
+    renderSpectatorChoose(s);
+    return;
+  }
+
   switch (s.phase) {
     case 'lobby':
       showScreen('screen-lobby');
@@ -355,8 +654,18 @@ function renderState() {
       renderPlay(s);
       break;
     case 'gameover':
-      showScreen('screen-gameover');
-      renderGameOver(s);
+      if (document.getElementById('screen-play').classList.contains('active')) {
+        // Coming from play — keep the last trick visible for 2.5s before summary
+        renderPlay(s);
+        setTimeout(() => {
+          showScreen('screen-gameover');
+          renderGameOver(s);
+        }, 2500);
+      } else {
+        // Reconnecting directly to gameover — show immediately
+        showScreen('screen-gameover');
+        renderGameOver(s);
+      }
       break;
   }
 }
@@ -366,30 +675,64 @@ function renderLobby(s) {
   $('lobby-room-code').textContent = s.roomCode;
   const list = $('lobby-players');
   list.innerHTML = '';
+  const isHost = s.mySeat === 0 && !s.isSpectator;
   for (const p of s.players) {
     const item = document.createElement('div');
     item.className = 'player-item';
-    item.innerHTML = `<span class="seat-num">${p.seat + 1}</span>${statusDot(p.connected)}<span>${esc(p.name)}</span>`;
+    const botIcon = p.isBot ? '<span class="bot-icon">🤖</span>' : '';
+    const statsHtml = (!p.isBot && p.gamesPlayed)
+      ? `<span class="lobby-stats">${p.wins}W / ${p.gamesPlayed}G</span>`
+      : '';
+    const notRankedBadge = (s.groupId && p.isGroupMember === false && !p.isBot)
+      ? '<span class="not-ranked-badge">⚠️ not ranked</span>'
+      : '';
+    const isLastBot = p.isBot && p.seat === s.players.length - 1;
+    const removeBtn = (isHost && isLastBot)
+      ? `<button class="bot-remove-btn" onclick="send({type:'removeBot'})">✕</button>`
+      : '';
+    item.innerHTML = `<span class="seat-num">${p.seat + 1}</span>${statusDot(p.connected)}${botIcon}<span class="lobby-player-name">${esc(p.name)}</span>${statsHtml}${notRankedBadge}${removeBtn}`;
     list.appendChild(item);
   }
   const remaining = NUM_PLAYERS - s.players.length;
   $('lobby-status').textContent = remaining > 0
     ? `Waiting for ${remaining} more player(s)...`
     : 'Game starting...';
+
+  const addBotBtn = $('lobby-add-bot');
+  if (addBotBtn) {
+    if (isHost && remaining > 0) {
+      addBotBtn.classList.remove('hidden');
+    } else {
+      addBotBtn.classList.add('hidden');
+    }
+  }
 }
 
 // --- Bidding ---
 function renderBidding(s) {
   renderPlayerStatusBar($('bidding-players'), s.players);
   const isMyTurn = s.turn === s.mySeat;
-  $('bid-status').textContent = isMyTurn
-    ? "It's your turn to bid!"
-    : `Waiting for ${s.players[s.turn]?.name || '?'} to bid...`;
+  $('bid-status').textContent = s.isSpectator
+    ? `👁 Watching: ${s.players[s.watchingSeat]?.name || '?'}`
+    : isMyTurn
+      ? "It's your turn to bid!"
+      : `Waiting for ${s.players[s.turn]?.name || '?'} to bid...`;
 
   if (s.bid >= 0 && s.bidder >= 0) {
     $('bid-current').textContent = `Current bid: ${s.players[s.bidder].name} - ${getBidFromNum(s.bid)}`;
   } else {
     $('bid-current').textContent = 'No bids yet';
+  }
+
+  const histEl = $('bid-history');
+  if (histEl && s.bidHistory && s.bidHistory.length > 0) {
+    histEl.innerHTML = s.bidHistory.slice().reverse().map(e =>
+      e.bidNum === null
+        ? `<div class="bid-hist-row bid-hist-pass"><span class="bid-hist-name">${esc(e.name)}</span><span class="bid-hist-val">Pass</span></div>`
+        : `<div class="bid-hist-row"><span class="bid-hist-name">${esc(e.name)}</span><span class="bid-hist-val">${getBidFromNum(e.bidNum)}</span></div>`
+    ).join('');
+  } else if (histEl) {
+    histEl.innerHTML = '';
   }
 
   const grid = $('bid-grid');
@@ -401,13 +744,13 @@ function renderBidding(s) {
       const btn = document.createElement('button');
       btn.className = `bid-btn ${getSuitClass(BID_SUITS[si])}`;
       btn.textContent = bidStr;
-      btn.disabled = !isMyTurn || bidNum <= s.bid;
+      btn.disabled = s.isSpectator || !isMyTurn || bidNum <= s.bid;
       btn.addEventListener('click', () => send({ type: 'bid', bidNum }));
       grid.appendChild(btn);
     }
   }
 
-  $('btn-pass').disabled = !isMyTurn;
+  $('btn-pass').disabled = s.isSpectator || !isMyTurn;
   renderHand($('bidding-hand'), s.hand, null, null);
 }
 
@@ -423,7 +766,7 @@ function renderPartner(s) {
   const grid = $('partner-grid');
   grid.innerHTML = '';
 
-  if (isBidder) {
+  if (isBidder && !s.isSpectator) {
     const values = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
     for (const val of values) {
       for (const suit of CARD_SUITS) {
@@ -458,6 +801,10 @@ function renderPlay(s) {
   const positions = ['bottom', 'left', 'top', 'right'];
   const trickPositions = ['bot', 'left', 'top', 'right'];
 
+  const table = $('play-table');
+  const activeSeatClasses = ['active-seat-bottom','active-seat-top','active-seat-left','active-seat-right'];
+  if (table) activeSeatClasses.forEach((c) => table.classList.remove(c));
+
   for (let i = 0; i < 4; i++) {
     const seat = seatOrder[i];
     const pos = positions[i];
@@ -467,9 +814,13 @@ function renderPlay(s) {
     if (player) {
       let text = player.name;
       if (seat === s.bidder) text += ' ★';
-      label.innerHTML = `${statusDot(player.connected)}${esc(text)}`;
+      const sets = s.sets?.[seat] ?? 0;
+      label.innerHTML = `<span class="seat-name-row">${statusDot(player.connected)}<span class="seat-name">${esc(text)}</span></span><span class="seat-sets">${sets}</span>`;
       label.className = 'seat-label';
-      if (seat === s.turn) label.classList.add('active-turn');
+      if (seat === s.turn) {
+        label.classList.add('active-turn');
+        if (table) table.classList.add(`active-seat-${pos}`);
+      }
       if (!player.connected) label.classList.add('disconnected');
     } else {
       label.textContent = '';
@@ -493,15 +844,9 @@ function renderPlay(s) {
     trickArea.appendChild(wrapper);
   }
 
-  // Sets display
+  // Sets display (only Last Trick button — per-player sets shown on seat labels)
   const setsDiv = $('sets-display');
   setsDiv.innerHTML = '';
-  for (let i = 0; i < s.players.length; i++) {
-    const item = document.createElement('span');
-    item.className = `set-item${i === s.mySeat ? ' is-me' : ''}`;
-    item.textContent = `${s.players[i].name}: ${s.sets[i]}`;
-    setsDiv.appendChild(item);
-  }
   if (s.lastTrick && !s.trickComplete) {
     const ltBtn = document.createElement('button');
     ltBtn.className = 'btn-last-trick';
@@ -511,7 +856,9 @@ function renderPlay(s) {
   }
 
   // Hand
-  const isMyTurn = s.turn === s.mySeat;
+  const isMyTurn = !s.isSpectator && s.turn === s.mySeat;
+  if (isMyTurn && prevTurn !== s.mySeat) playDingSound();
+  prevTurn = s.turn;
   let validSuits = null;
   if (isMyTurn && s.hand) {
     validSuits = getValidSuitsClient(s.hand, s.trumpSuit, s.currentSuit, s.trumpBroken);
@@ -544,6 +891,25 @@ function getValidSuitsClient(hand, trumpSuit, currentSuit, trumpBroken) {
   return valid;
 }
 
+// --- Spectator ---
+
+function renderSpectatorChoose(s) {
+  const grid = $('spectator-grid');
+  if (!grid) return;
+  grid.innerHTML = s.players.map((p) =>
+    `<button class="btn spectator-player-btn" onclick="sendWatchSeat(${p.seat})">
+      <span class="spectator-seat-num">Seat ${p.seat + 1}</span>
+      <span class="spectator-player-name">${esc(p.name)}</span>
+    </button>`
+  ).join('');
+}
+
+function sendWatchSeat(seat) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'watchSeat', seat }));
+  }
+}
+
 // --- Game Over ---
 function renderGameOver(s) {
   renderPlayerStatusBar($('gameover-players'), s.players);
@@ -554,27 +920,60 @@ function renderGameOver(s) {
   const bidderName = s.bidder >= 0 ? s.players[s.bidder].name : '?';
   const bidStr = s.bid >= 0 ? getBidFromNum(s.bid) : '?';
 
+  const container = $('gameover-container');
   if (lastGameOver) {
     const myName = s.mySeat >= 0 ? s.players[s.mySeat].name : '';
     const iWon = lastGameOver.winnerNames.includes(myName);
+    if (lastGameOver._soundPlayed !== true) {
+      lastGameOver._soundPlayed = true;
+      iWon ? playWinSound() : playLoseSound();
+    }
+    if (container) {
+      container.classList.remove('outcome-win', 'outcome-loss');
+      container.classList.add(iWon ? 'outcome-win' : 'outcome-loss');
+    }
     title.textContent = iWon ? 'You Won!' : 'Game Over';
     const winnersStr = lastGameOver.winnerNames.join(' & ');
     detail.textContent = lastGameOver.bidderWon
       ? `${winnersStr} won the bid of ${bidStr} (needed ${s.setsNeeded} sets)`
       : `${winnersStr} defeated the bid of ${bidStr}`;
   } else {
+    if (container) container.classList.remove('outcome-win', 'outcome-loss');
     title.textContent = 'Game Over';
     detail.textContent = `Bid: ${bidderName} - ${bidStr} (needed ${s.setsNeeded} sets)`;
   }
 
+  // Determine which players are on the bidder's team
+  let bidderTeamNames = null;
+  if (lastGameOver && s.bidder >= 0) {
+    bidderTeamNames = new Set(
+      lastGameOver.bidderWon
+        ? lastGameOver.winnerNames
+        : s.players.map((p) => p.name).filter((n) => !lastGameOver.winnerNames.includes(n)),
+    );
+  }
+  const partnerSeat = bidderTeamNames
+    ? s.players.findIndex((p, idx) => idx !== s.bidder && bidderTeamNames.has(p.name))
+    : -1;
+
   scores.innerHTML = '';
   for (let i = 0; i < s.players.length; i++) {
     const item = document.createElement('div');
-    item.className = 'score-item';
-    let nameText = s.players[i].name;
-    if (i === s.bidder) nameText += ' (Bidder)';
-    item.innerHTML = `<span class="name">${esc(nameText)}</span><span class="sets-won">${s.sets[i]} sets</span>`;
+    const isBidderTeam = bidderTeamNames && bidderTeamNames.has(s.players[i].name);
+    item.className = `score-item${isBidderTeam ? ' team-bidder' : ''}`;
+    const roleBadge = i === s.bidder
+      ? '<span class="role-badge">Bidder</span>'
+      : i === partnerSeat
+        ? '<span class="role-badge">Partner</span>'
+        : '';
+    item.innerHTML = `<span class="name">${esc(s.players[i].name)}${roleBadge}</span><span class="sets-won">${s.sets[i]} sets</span>`;
     scores.appendChild(item);
+  }
+
+  const groupLbEl = $('gameover-group-lb');
+  if (groupLbEl) groupLbEl.innerHTML = '';
+  if (s.groupId) {
+    renderGroupLeaderboard(s.groupId);
   }
 }
 
@@ -619,10 +1018,32 @@ function getShareUrl() {
 // --- Event listeners ---
 $('input-name').value = playerName;
 
+// Show login section initially; initAuth will switch to game-section if already authed
+document.getElementById('login-section').classList.remove('hidden');
+document.getElementById('game-section').classList.add('hidden');
+
+document.getElementById('btn-guest').addEventListener('click', () => {
+  authToken = null;
+  authDisplayName = null;
+  showGameSection(null);
+});
+
+// Kick off auth check on page load
+initAuth();
+loadLeaderboard();
+
 $('btn-create').addEventListener('click', async () => {
   playerName = $('input-name').value.trim();
   if (!playerName) { alert('Please enter your name'); return; }
   localStorage.setItem('playerName', playerName);
+  if (authToken && authDisplayName && playerName !== authDisplayName) {
+    fetch('/api/me', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ displayName: playerName }),
+    }).catch(() => {});
+    authDisplayName = playerName;
+  }
 
   $('btn-create').disabled = true;
   try {
@@ -643,6 +1064,14 @@ $('btn-join').addEventListener('click', () => {
   playerName = $('input-name').value.trim();
   if (!playerName) { alert('Please enter your name'); return; }
   localStorage.setItem('playerName', playerName);
+  if (authToken && authDisplayName && playerName !== authDisplayName) {
+    fetch('/api/me', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify({ displayName: playerName }),
+    }).catch(() => {});
+    authDisplayName = playerName;
+  }
 
   const code = $('input-room').value.trim().toUpperCase();
   if (!code || code.length < 3) { alert('Please enter a valid room code'); return; }
